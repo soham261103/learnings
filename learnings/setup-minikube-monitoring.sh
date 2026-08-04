@@ -73,6 +73,20 @@ resolve_helm_chart() {
     HELM_CHART="${tgz}"
 }
 
+unlock_helm_release_if_stuck() {
+    local status
+    status=$(helm status "${HELM_RELEASE}" -n "${HELM_NAMESPACE}" \
+        -o jsonpath='{.info.status}' 2>/dev/null || true)
+
+    case "${status}" in
+        pending-install|pending-upgrade|pending-rollback)
+            log "Helm release stuck in '${status}' — clearing lock and retrying install..."
+            kubectl delete secret -n "${HELM_NAMESPACE}" \
+                -l "owner=helm,name=${HELM_RELEASE}" --ignore-not-found
+            ;;
+    esac
+}
+
 # ── 1) Check prerequisites ───────────────────────────────────────────────────
 log "Checking prerequisites..."
 require_cmd minikube
@@ -124,6 +138,8 @@ log "Installing ${HELM_CHART_REF} as release '${HELM_RELEASE}'..."
 
 resolve_helm_chart
 
+unlock_helm_release_if_stuck
+
 HELM_ARGS=(
     upgrade --install "${HELM_RELEASE}" "${HELM_CHART}"
     --namespace "${HELM_NAMESPACE}"
@@ -135,7 +151,10 @@ HELM_ARGS=(
     --timeout 10m
 )
 
-helm "${HELM_ARGS[@]}"
+log "Running helm upgrade --install (pulls container images; may take 5–10 minutes)..."
+if ! helm "${HELM_ARGS[@]}"; then
+    err "Helm install failed. Check: kubectl get pods -n ${HELM_NAMESPACE} && kubectl get events -n ${HELM_NAMESPACE} --sort-by=.lastTimestamp"
+fi
 
 # ── 7) Wait for pods ─────────────────────────────────────────────────────────
 log "Waiting for monitoring pods to be ready..."
