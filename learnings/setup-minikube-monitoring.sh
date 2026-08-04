@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 #
 # setup-minikube-monitoring.sh
 # Creates a Minikube cluster and installs Prometheus + Grafana via Helm
 #
-# Usage:
+# Usage:m
 #   chmod +x setup-minikube-monitoring.sh
 #   ./setup-minikube-monitoring.sh
 #
@@ -18,13 +18,14 @@ set -euo pipefail
 # ── Config (edit if needed) ────────────────────────────────────────────────
 CLUSTER_NAME="${CLUSTER_NAME:-minikube}"
 MINIKUBE_CPUS="${MINIKUBE_CPUS:-4}"
-MINIKUBE_MEMORY="${MINIKUBE_MEMORY:-8192}"
+MINIKUBE_MEMORY="${MINIKUBE_MEMORY:-6144}"  # override if needed: MINIKUBE_MEMORY=4096
 MINIKUBE_DRIVER="${MINIKUBE_DRIVER:-docker}"   # docker | hyperv | virtualbox
 
 HELM_RELEASE="${HELM_RELEASE:-kube-prometheus-stack}"
 HELM_NAMESPACE="${HELM_NAMESPACE:-monitoring}"
-HELM_CHART="prometheus-community/kube-prometheus-stack"
-HELM_CHART_VERSION="${HELM_CHART_VERSION:-}"  # empty = latest
+HELM_CHART_REF="prometheus-community/kube-prometheus-stack"
+HELM_CHART_VERSION="${HELM_CHART_VERSION:-}"  # empty = latest from repo index
+HELM_CHART_CACHE="${HELM_CHART_CACHE:-${TMPDIR:-/tmp}/helm-charts}"
 
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-admin}"
 
@@ -36,11 +37,48 @@ require_cmd() {
     command -v "$1" &>/dev/null || err "'$1' not found. Install it first."
 }
 
+require_docker() {
+    if ! docker info &>/dev/null; then
+        err "Docker daemon is not running. Start Docker Desktop (Windows) and enable WSL integration, or run: sudo service docker start"
+    fi
+}
+
+resolve_helm_chart() {
+    local chart_name="kube-prometheus-stack"
+    local version="${HELM_CHART_VERSION}"
+
+    if [[ -z "${version}" ]]; then
+        version=$(helm show chart "${HELM_CHART_REF}" | awk '/^version:/ {print $2; exit}')
+        log "Resolved chart version: ${version}"
+    fi
+
+    local tgz="${HELM_CHART_CACHE}/${chart_name}-${version}.tgz"
+    local url="https://github.com/prometheus-community/helm-charts/releases/download/${chart_name}-${version}/${chart_name}-${version}.tgz"
+
+    mkdir -p "${HELM_CHART_CACHE}"
+
+    if [[ -f "${tgz}" ]]; then
+        log "Using cached chart: ${tgz}"
+    else
+        log "Downloading ${chart_name} v${version} (curl fallback if helm pull times out)..."
+        if helm pull "${HELM_CHART_REF}" --version "${version}" --destination "${HELM_CHART_CACHE}" 2>/dev/null \
+            && [[ -f "${tgz}" ]]; then
+            log "Downloaded via helm pull"
+        else
+            require_cmd curl
+            curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 -o "${tgz}" "${url}"
+        fi
+    fi
+
+    HELM_CHART="${tgz}"
+}
+
 # ── 1) Check prerequisites ───────────────────────────────────────────────────
 log "Checking prerequisites..."
 require_cmd minikube
 require_cmd kubectl
 require_cmd helm
+require_docker
 
 # ── 2) Start Minikube cluster ────────────────────────────────────────────────
 if minikube status -p "${CLUSTER_NAME}" &>/dev/null; then
@@ -82,7 +120,9 @@ kubectl create namespace "${HELM_NAMESPACE}" --dry-run=client -o yaml | kubectl 
 #   - Alertmanager
 #   - Grafana (pre-configured with Prometheus datasource)
 #   - node-exporter, kube-state-metrics
-log "Installing ${HELM_CHART} as release '${HELM_RELEASE}'..."
+log "Installing ${HELM_CHART_REF} as release '${HELM_RELEASE}'..."
+
+resolve_helm_chart
 
 HELM_ARGS=(
     upgrade --install "${HELM_RELEASE}" "${HELM_CHART}"
@@ -94,10 +134,6 @@ HELM_ARGS=(
     --wait
     --timeout 10m
 )
-
-if [[ -n "${HELM_CHART_VERSION}" ]]; then
-    HELM_ARGS+=(--version "${HELM_CHART_VERSION}")
-fi
 
 helm "${HELM_ARGS[@]}"
 
@@ -126,11 +162,11 @@ echo "════════════════════════�
 echo "  PROMETHEUS"
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Option A — port-forward:"
-echo "    kubectl port-forward -n ${HELM_NAMESPACE} svc/${HELM_RELEASE}-kube-prometheus-prometheus 9090:9090"
+echo "    kubectl port-forward -n ${HELM_NAMESPACE} svc/${HELM_RELEASE}-prometheus 9090:9090"
 echo "    Open: http://localhost:9090"
 echo
 echo "  Option B — minikube service:"
-echo "    minikube service ${HELM_RELEASE}-kube-prometheus-prometheus -n ${HELM_NAMESPACE} -p ${CLUSTER_NAME}"
+echo "    minikube service ${HELM_RELEASE}-prometheus -n ${HELM_NAMESPACE} -p ${CLUSTER_NAME}"
 echo
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Useful commands"
